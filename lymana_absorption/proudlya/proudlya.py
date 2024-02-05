@@ -1,21 +1,21 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-"""proudly.py - classes and methods for storing parameters and predicting
+"""proudlya.py - classes and methods for storing parameters and predicting
 observed spectra and photometry from them, given a Source object.
 """
 import warnings
 
 import numpy as np
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt # Used for debugging
 
 from sedpy.observate import getSED
 
 from prospect.sources.constants import lightspeed, jansky_cgs
 from prospect.models.sedmodel import SpecModel, PolySpecModel
 
-from lymana_absorption.mean_IGM_absorption import igm_absorption
-from lymana_absorption.lymana_optical_depth import tau_DLA, tau_IGM
+from ..mean_IGM_absorption import igm_absorption
+from ..lymana_optical_depth import tau_DLA
 
 __all__ = [
            "DLASpecModel", "DLAPolySpecModel",
@@ -31,15 +31,23 @@ class DLASpecModel(SpecModel):
         DLA_logN_HI     : column density toward the DLA
         DLA_T_HI        : temperature of the HI gas
         DLA_b_turb      : turbulence parameter of the HI gas
+        IGM_tau         : callable to calculate the IGM opacity
         IGM_R_ion       : radius of the ionised bubble around the galaxy
         IGM_x_HI_global : global neutral fraction
-        IGM_cosmo       : instance of `astropy.cosmology.cosmology`.
+
+    `IGM_tau` is a callable IGM_tau(w, z, R_ion=r, x_HI_global=x) -> tau where
+        w   : 1-d array of observed wavelengths [\AA]
+        z   : source redshift (`"zred"` from `prospector`)
+        r   : optional, radius of ionised bubble (`"IGM_R_ion"`) [Mpc]
+        x   : optional, neutral fraction of IGM (`"IGM_x_HI_global"`)
+        tau : 1-d array of transmission values, same shape as `w`
 
     """
 
     def __init__(self, *args, **kwargs):
 
         super().__init__(*args, **kwargs)
+        self.__setup_igm_tau__()
 
     def _available_parameters(self):
         pars = [("DLA_logN_HI",
@@ -48,11 +56,40 @@ class DLASpecModel(SpecModel):
                 ("DLA_b_turb", "Turbulence parameter of the gas"),
                 ("IGM_interp", "Callable to calculate the IGM opacity"),
                 ("IGM_R_ion", "Radium of ionised bubble around source [Mpc]"),
-                ("IGM_x_HI_global", "Global neutral fraction [0-1]. Not bubble x_HI!"),
-                ("IGM_cosmo", "Cosmology used for IGM calculations [Need checking]")
+                ("IGM_x_HI_global", "Global neutral fraction [0-1]. Not bubble x_HI!")
                 ]
 
         return pars
+
+    def __setup_igm_tau__(self):
+
+        R_ion        = self.params.get('IGM_R_ion',       [np.nan])
+        x_HI_global  = self.params.get('IGM_x_HI_global', [np.nan])
+        self.tau_IGM = self.params.get('IGM_tau',         [None])[0]
+
+        assert np.isnan(R_ion[0])!=callable(self.tau_IGM), (
+            '"IGM_R_ion" must be used with a callable "IGM_tau"')
+        assert np.isnan(x_HI_global[0])!=callable(self.tau_IGM), (
+            '"IGM_x_HI_global" must be used with a callable "IGM_tau"')
+        assert np.isnan(R_ion[0])==np.isnan(x_HI_global[0]), (
+            '"IGM_R_ion" and "x_HI_global" must be used together')
+
+        if self.tau_IGM is None:
+            self.has_tau_igm = False
+            return
+
+        # Occasionally, the size of the interpolator can be so large that the
+        # object cannot be pickled (!). See `io.write_results` for more information.
+        self.params['IGM_tau'] = ['_interpolator_',]
+
+        # Simple check to test that tau_IGM has the correct function signature.
+        check_tau_IGM = self.tau_IGM(
+            np.logspace(2, 3.5, 100), 7.5, 1., .5)
+        assert len(check_tau_IGM)==100, 'Check `"IGM_tau" function matches requirements'
+       
+        self.has_tau_igm = True
+
+
 
     def __cache_DLA_transmission__(self):
 
@@ -77,27 +114,25 @@ class DLASpecModel(SpecModel):
         assert getattr(self, '_wave', None) is not None, (
             'Call `predict` first, to assign a model wavelength grid')
 
-        R_ion       = self.params.get('IGM_R_ion',   np.nan)
-        x_HI_global = self.params.get('IGM_x_HI_global', np.nan)
-        igm_cosmo   = self.params.get('IGM_cosmo',   None)
-
-        assert np.isnan(R_ion)==np.isnan(x_HI_global)==(igm_cosmo is None), (
-            '"IGM_R_ion", "x_HI_global" and "IGM_cosmo" must be used together')
-       
         self._zred = self.params.get('zred', 0)
 
         # This is done and double checked that wavelength is right.
-        self.img_transmission = igm_absorption(
+        self.igm_transmission = igm_absorption(
              self._wave*(1+self._zred), self._zred)
 
         # For simple models without IGM.
-        if igm_cosmo is None:
+        if not self.has_tau_igm:
             self.igm_transmission *= np.where(self._wave<1215.6, 0., 1.)
             return 
 
-        tau = tau_IGM(
-            wl_obs_array=self._wave*(1+self._zred), z_s=self._zred,
-            R_ion=R_ion, x_HI_global=x_HI_global, cosmo=igm_cosmo)
+        # These could use an explicit getter b/c the call to `__setup_igm_tau__`
+        # should prevent these parameters from non existing or being invalid.
+        R_ion       = self.params.get('IGM_R_ion',   np.nan)
+        x_HI_global = self.params.get('IGM_x_HI_global', np.nan)
+
+        tau = self.tau_IGM(
+            #self._wave*(1+self._zred), z_s=self._zred, This should be obs wave to match Joris' convention.
+            self._wave, self._zred[0], R_ion[0], x_HI_global[0])
             
         self.igm_transmission *= np.exp(-tau)
 
@@ -417,4 +452,44 @@ class DLASpecModel(SpecModel):
 class DLAPolySpecModel(PolySpecModel, DLASpecModel):
     """Same as `DLAPolySpecModel`, but includes a calibration polynomial to
     scale the spectrum to the level of the photometry."""
-    pass
+
+    def spec_calibration(self, theta=None, obs=None, spec=None, **kwargs):
+        """Implements a Chebyshev polynomial calibration model. This uses
+        least-squares to find the maximum-likelihood Chebyshev polynomial of a
+        certain order describing the ratio of the observed spectrum to the model
+        spectrum, conditional on all other parameters, using least squares. If
+        emission lines are being marginalized out, they are excluded from the
+        least-squares fit.
+
+        Parameters
+        ----------
+        obs :  Instance of `Spectrum`
+
+        spec : ndarray of shape (nwave,)
+            The model spectrum.
+
+        Returns
+        -------
+        cal : ndarray of shape (nwave,)
+           A polynomial given by :math:`\sum_{m=0}^M a_{m} * T_m(x)`.
+        """
+        original_mask = obs.get('mask', np.ones_like(obs['wavelength'], dtype=bool)).copy()
+
+        # Mask region where transmission is 0 (generates nan spectral calibration otherwise).
+        _zred = self.params.get('zred', 0)
+        obs.mask = np.all((
+            (obs['wavelength'] / (1.+_zred) > 1200), # Ignore blue spectrum.
+            original_mask,                           # Honour data mask.
+            spec>0),                                 # Use only valid data.
+            axis=0)
+
+        # Call parent method with updated mask.
+        _speccal = super().spec_calibration(
+            theta=theta, obs=obs, spec=spec, **kwargs)
+
+        # Restore original mask. This is dishonorable, because if no mask was given,
+        # now a mask is present. User will be puzzled. But mask is all valid, so 
+        # user puzzled but not disappointed. Presumably.
+        obs.mask = original_mask
+
+        return _speccal
