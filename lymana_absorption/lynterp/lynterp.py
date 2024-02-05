@@ -10,8 +10,9 @@ import numpy as np
 from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator, griddata
 
 from prospect.sources import CSPSpecBasis, FastStepBasis
-from ..lymana_absorption.lymana_optical_depth import tau_IGM
+from ..lymana_optical_depth import tau_IGM
 
+from spectres.spectral_resampling import spectres
 
 
 def create_interpolator_grid_file(
@@ -47,7 +48,7 @@ def create_interpolator_grid_file(
         if not np.isclose(wgrid[-1], wgrid_sps[-1]):
             warnings.warn(f'{wgrid[-1]=}>{wgrid_sps[-1]=} useless for prospector')
 
-    tau_IGM = np.array([[[
+    tau_IGM_array = np.array([[[
         tau_IGM(wgrid*(1+z), z, R_ion=R_ion, x_HI_global=x_HI)
                     for z in tqdm.tqdm(zgrid, leave=False, colour='red')]
                 for R_ion in tqdm.tqdm(rgrid, leave=False, colour='white')]
@@ -56,7 +57,7 @@ def create_interpolator_grid_file(
 
     output = {
          'wgrid': wgrid, 'zgrid': zgrid, 'rgrid': rgrid, 'xgrid': xgrid,
-         'tau_igm': tau_IGM}
+         'tau_igm': tau_IGM_array}
     with open(output_file_name, 'wb') as fhandle:
         pickle.dump(output, fhandle)
         print(f'tau_igm grid written to {output_file_name=}')
@@ -121,16 +122,25 @@ def create_interpolator_from_grid_file(
 
     assert os.path.isfile(input_file), f'Cannot find input grid {input_file=}'
     assert not os.path.isfile(output_file), f'File {output_file=} already exists'
-    tau_IGM = np.load(input_file)
 
-    sps = CSPSpecBasis(zcontinuous=True, compute_vega_mags=False)
-
-    rgrid = np.logspace(-1, 2, 30)
-    xgrid = np.linspace(0., 1., 30)
-    zgrid = np.linspace(4.5, 20., 100)
-    wgridold = np.copy(sps.wavelengths)
-    wgrid = np.hstack((wgridold[wgridold<3500.], wgridold[wgridold>=3500][::25], wgridold[-1]))
-
+    if os.path.splitext(input_file)[1]=='npy':
+        tau_IGM_array = np.load(input_file)
+        sps = CSPSpecBasis(zcontinuous=True, compute_vega_mags=False)
+        wgridold = np.copy(sps.wavelengths)
+        wgrid = np.hstack((wgridold[wgridold<3500.], wgridold[wgridold>=3500][::25], wgridold[-1]))
+        rgrid = np.logspace(-1, 2, 30)
+        xgrid = np.linspace(0., 1., 30)
+        zgrid = np.linspace(4.5, 20., 100)
+        raise ValueError('Not supported anymore')
+    else:
+        with open(input_file, 'rb') as fhandle:
+            _grid_dict = pickle.load(fhandle)
+            tau_IGM_array = _grid_dict['tau_igm']
+            wgrid   = _grid_dict['wgrid']
+            zgrid   = _grid_dict['zgrid']
+            rgrid   = _grid_dict['rgrid']
+            xgrid   = _grid_dict['xgrid']
+    print(f'Loaded grid of tau_IGM from {input_file=}')
 
     coords = np.meshgrid(xgrid, rgrid, zgrid, indexing='ij')
     coords = np.vstack([
@@ -138,7 +148,7 @@ def create_interpolator_from_grid_file(
         coords[0].ravel(), np.log(coords[1].ravel()), np.log(coords[2].ravel())
         ]).T
     _tau_igm_wgrid_interp_ = LinearNDInterpolator(
-        coords, tau_IGM.reshape(-1, wgrid.size)
+        coords, tau_IGM_array.reshape(-1, wgrid.size)
         )
 
     """
@@ -225,4 +235,90 @@ def test_grid(n_tests=10, input_file='tau_igm_interp_v0.2.pckl'):
         handletextpad=0.3, labelspacing=0, handlelength=1.2,
         loc='upper left')#, loc='lower left', bbox_to_anchor=(0., 1.))
     for line in legend.get_lines(): line.set_lw(3)
+    plt.savefig('transmission_uncertainties.png')
+
+
+
+def test_grid_new(n_tests=10, input_file='tau_igm_interp_v0.2.pckl',
+    use_grid=False, binning=0, show_data=False):
+
+    interpolator = pickle.load(open(input_file, 'rb'))
+    wgrid, zgrid, rgrid, xgrid = [
+        interpolator[key] for key in ('wgrid', 'zgrid', 'rgrid', 'xgrid')]
+    tau_igm_inter = interpolator['tau_igm_interp']
+
+    np.random.seed(8614)
+
+    z_array = (
+        np.random.choice(zgrid, n_tests) if use_grid else
+        sorted(np.random.uniform(zgrid[0], zgrid[-1], size=n_tests))
+    )
+    cmap = matplotlib.colormaps['nipy_spectral']
+    cmap = matplotlib.colormaps['viridis']
+    norm = matplotlib.colors.Normalize(vmin=zgrid[0], vmax=zgrid[-1])
+
+    n_row = int(np.ceil(n_tests/4))
+    n_col = 4
+    fig, axes = plt.subplots(n_row, n_col, figsize=(20, 12), sharex=True, sharey=True)
+
+    w_bin = (wgrid if binning==0 else
+        np.linspace(wgrid[0], wgrid[-1], wgrid.size//binning))
+
+    for i in range(n_tests):
+        ax = axes.ravel()[i]
+        #n_wave = np.random.randint(500, 6500)
+        #w0, w1 = np.log10(wgrid[[0, -1]])
+        #w = np.logspace(w0, w1, n_wave)
+        z = z_array[i]
+        if use_grid:
+            r = np.random.choice(rgrid)
+            x = np.random.choice(xgrid)
+        else:
+            r0, r1 = np.log(rgrid[[0, -1]])
+            r = np.random.uniform(r0, r1)
+            x = np.random.uniform(xgrid[0], xgrid[-1])
+            r = np.exp(r)
+        w = wgrid
+
+        #test_name = f'{n_wave:04d}_{z:4.3f}_{r:4.3f}_{x:4.3f}'
+        test_name = f'z={z:4.3f} R={r:4.3f} xHI={x:4.3f}'
+        print(test_name)
+        start_time = time.time()
+        benchmark = tau_IGM(
+            w*(1+z), z, R_ion=r, x_HI_global=x)
+        elapsed = (time.time()-start_time)*1e3
+        print(f'Elapsed {elapsed:7.4f} ms for benchmark')
+        start_time = time.time()
+        test = tau_igm_inter(w, z, r, x)
+        elapsed = (time.time()-start_time)*1e3
+        print(f'Elapsed {elapsed:7.4f} ms for test')
+
+        if binning>0:
+            benchmark, _ = spectres(
+                w_bin, wgrid, benchmark, benchmark*0, fill=np.nan, verbose=False)
+            test, _ = spectres(
+                w_bin, wgrid, test, test*0, fill=np.nan, verbose=False)
+        
+        rel_diff = np.exp(-benchmark) - np.exp(-test)
+        rel_diff = np.where(
+            #(np.exp(-benchmark)<1.e-6) & (np.exp(-test)<1.e-6),
+            rel_diff>1e100,
+            0., rel_diff)
+        color = cmap(norm(z))
+        ax.step(
+             #w*1e4, (np.exp(-benchmark+test)-1)*1e6, label=test_name,
+             w_bin/1e4, rel_diff, label=test_name,
+             color=color, lw=1.5, ls=':')
+        if show_data:
+            ax.step(
+                 w_bin/1e4, np.exp(-benchmark), label=test_name,
+                 color=color, lw=1.5, ls='-')
+            ax.step(
+                 w_bin/1e4, np.exp(-test), label=test_name,
+                 color=color, lw=1.5, ls='--')
+        ax.semilogx()
+        ax.tick_params(labelsize=20,)
+        ax.set_xlabel('$\mathrm{\lambda_{emit.} \; [\\mu m]}$', fontsize=25)
+        ax.set_ylabel('$\mathrm{T_{interp.}/T_{JW}-1 \; [ppm]}$', fontsize=25)
+        ax.set_title(test_name, fontsize=22)
     plt.savefig('transmission_uncertainties.png')
