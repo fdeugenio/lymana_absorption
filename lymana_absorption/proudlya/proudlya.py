@@ -83,8 +83,11 @@ class DLASpecModel(SpecModel):
         self.params['IGM_tau'] = ['_interpolator_',]
 
         # Simple check to test that tau_IGM has the correct function signature.
+        R_ion = self.params.get('IGM_R_ion', 0.1)[0]
+        x_HI_global = self.params.get('IGM_x_HI_global', .9)[0]
+        z = self.params.get('zred')[0]
         check_tau_IGM = self.tau_IGM(
-            np.logspace(2, 3.5, 100), 7.5, 1., .5)
+            np.logspace(2, 3.5, 100), z, R_ion, x_HI_global)
         assert len(check_tau_IGM)==100, 'Check `"IGM_tau" function matches requirements'
        
         self.has_tau_igm = True
@@ -480,7 +483,7 @@ class DLAPolySpecModel(PolySpecModel, DLASpecModel):
         obs.mask = np.all((
             (obs['wavelength'] / (1.+_zred) > 1200), # Ignore blue spectrum.
             original_mask,                           # Honour data mask.
-            spec>0),                                 # Use only valid data.
+            spec>1e-30),                                 # Use only valid data.
             axis=0)
 
         # Call parent method with updated mask.
