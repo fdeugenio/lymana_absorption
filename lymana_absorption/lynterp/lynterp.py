@@ -111,7 +111,7 @@ class tau_igm_interp():
         assert self.r[0]<=R_ion<=self.r[-1], f'R_ion must be {self.r[0]}<R_ion<{self.r[-1]}'
         assert self.x[0]<=x_HI_global<=self.x[-1], f'x_HI must be {self.x[0]}<x_HI<{self.x[-1]}'
      
-        tau_wl = self.tau_igm(x_HI_global, np.log(R_ion), np.log(z_s))
+        tau_wl = self.tau_igm(x_HI_global, R_ion, np.log(z_s))
      
         return np.interp(wl_emit, self.w, tau_wl)
 
@@ -144,8 +144,8 @@ def create_interpolator_from_grid_file(
 
     coords = np.meshgrid(xgrid, rgrid, zgrid, indexing='ij')
     coords = np.vstack([
-         # x_HI_global   ,    log R_ion             ,    log z
-        coords[0].ravel(), np.log(coords[1].ravel()), np.log(coords[2].ravel())
+         # x_HI_global   ,    R_ion             ,    log z
+        coords[0].ravel(), coords[1].ravel(), np.log(coords[2].ravel())
         ]).T
     _tau_igm_wgrid_interp_ = LinearNDInterpolator(
         coords, tau_IGM_array.reshape(-1, wgrid.size)
@@ -274,10 +274,9 @@ def test_grid_new(n_tests=10, input_file='tau_igm_interp_v0.2.pckl',
             r = np.random.choice(rgrid)
             x = np.random.choice(xgrid)
         else:
-            r0, r1 = np.log(rgrid[[0, -1]])
+            r0, r1 = rgrid[[0, -1]]
             r = np.random.uniform(r0, r1)
             x = np.random.uniform(xgrid[0], xgrid[-1])
-            r = np.exp(r)
         w = wgrid
 
         #test_name = f'{n_wave:04d}_{z:4.3f}_{r:4.3f}_{x:4.3f}'
